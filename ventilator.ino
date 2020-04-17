@@ -152,7 +152,8 @@ void homingSequence() {
     
     lastEncoderVal = encoderVal;
     encoderVal = readEncoder();
-    
+
+    // THIS UPDATE IS TOO SLOW TO BE WORK HERE. USE SERIAL INSTEAD
 //    u8g.firstPage();
 //    do {
 //        sprintf(homeBuf, "Enc Val: %d %d", encoderVal, lastEncoderVal);
@@ -170,21 +171,7 @@ void homingSequence() {
       setMotorSpeed(homeMotorSpeed);
       updateMotor(dir);
     }else if (lastEncoderVal > encoderVal) {
-      // decreasing encoder value
-//      Serial.print("Encoder value decreasing");
-//      Serial.print("\tDirection");
-//      Serial.print(dir);
-//      Serial.print("\tLast direction");
-//      Serial.println(lastDir);
-//      
-//      Serial.println();
-//      Serial.print("Encoder value: ");
-//      Serial.print(encoderVal);
-//      Serial.print("\tLast encoder value: ");
-//      Serial.print(lastEncoderVal);
-//      Serial.print("\tMin Encoder value: ");
-//      Serial.println(minEncoderVal);
-      
+      // decreasing encoder value      
       switch (dir) {
         case CLOCKWISE:
         {
@@ -229,19 +216,6 @@ void homingSequence() {
       
     } else {
       // increasing encoder value
-//      Serial.print("Encoder value increasing");
-//      Serial.print("\tDirection");
-//      Serial.print(dir);
-//      Serial.print("\tLast direction");
-//      Serial.println(lastDir);
-//
-//      Serial.println();
-//      Serial.print("Encoder value: ");
-//      Serial.print(encoderVal);
-//      Serial.print("\tLast encoder value: ");
-//      Serial.print(lastEncoderVal);
-//      Serial.print("\tMin Encoder value: ");
-//      Serial.println(minEncoderVal);
       switch (dir) {
         case CLOCKWISE:
         {
