@@ -31,17 +31,21 @@
 
 #define START_BUTTON A4
 
+#define PERCENT_PER_SEC  222
+#define ENCODER_LIMIT  77
+const float ENCODER_FACTOR = 0.77;
+
 typedef struct {
   int TV;
-  int RR;
-  float IERatio;
+  int BPM;
+  int IERatio;
 } Volume_t;
 
 typedef struct {
   int peak;
   int plateau;
   int peep;
-} Pressures_t;
+} Pressure_t;
 
 typedef enum {
   STATUS_SCREEN,
@@ -58,6 +62,7 @@ typedef enum {
 } Key_t;
 
 typedef enum {
+  NAV_NULL,
   NAV_NEXT,
   NAV_PREVIOUS,
   NAV_FORWARD,
@@ -83,10 +88,39 @@ typedef enum {
   COUNTERCLOCKWISE
 } MotorDirection_t;
 
+typedef enum {
+  VENT_IDLE,
+  VENT_RUNNING,
+  VENT_SETTING
+} VentState_t;
+
+typedef struct {
+  int maxEncoderStroke;
+  int period;
+  int iTime;
+  int eTime;
+  int forwardMotorSpeed;
+  int revMotorSpeed;
+} Stroke_t;
+
 U8GLIB_ST7920_128X64_1X u8g(U8G_SCK, U8G_MOSI, U8G_SS_PIN);
 
-Volume_t volume = {0, 0, 0.0};
-Pressures_t pressure = {0, 0, 0};
+Volume_t volume = {
+  .TV = 50,
+  .BPM = 15,
+  .IERatio = 2
+};
+
+Stroke_t stroke = {
+  .maxEncoderStroke = 38, // Taking encoder reading btwn 0-76
+  .period = 4000,
+  .iTime = 0,
+  .eTime = 0,
+  .forwardMotorSpeed = 100,
+  .revMotorSpeed = 100
+};
+
+Pressure_t pressure = {0, 0, 0};
 volatile Screens_t displayScreen = STATUS_SCREEN;
 volatile StatusScreen_t statusDisplay = VOL_DISPLAY;
 volatile Setting_t currentSetting;
@@ -94,8 +128,11 @@ volatile unsigned long lastDialPress = millis();
 volatile unsigned long lastStartButtonPress = millis();
 unsigned long displayTime = millis();
 StatusScreen_t lastDisplay = VOL_DISPLAY;
-volatile int runMotor = 0;
-MotorDirection_t motorDir = MOTOR_HALT;
+volatile VentState_t ventState = VENT_IDLE;
+MotorDirection_t ventStrokeDir = CLOCKWISE;
+volatile bool runHomeSequence = false;
+Navigation_t menuNav = NAV_NULL;
+volatile int currentSettingVal = 0;
 
 int selectedMenuItem = 0;
 int currentMenuItemNo = 0;
@@ -107,8 +144,17 @@ void setup() {
   Serial.begin(115200);
   motorInit();
   pciSetup();
-  delay(100);
+  delay(1000);
+  startupDisplay();
   homingSequence();
+}
+
+void startupDisplay() {
+  
+  u8g.firstPage();
+  do {
+    u8g.drawStr(0, 32, "BOOTING...");
+  } while(u8g.nextPage());
 }
 
 void loop() {
@@ -117,18 +163,143 @@ void loop() {
       updateDisplay();
   } while(u8g.nextPage());
 
-  switch (runMotor) {
-    case 0:
-      motorDir = MOTOR_HALT;
+  switch (ventState) {
+    case VENT_IDLE:
+      vent_stop();
       break;
-    case 1:
-      motorDir = CLOCKWISE;
-      analogWrite(MOTOR_PWM, 175);
+    case VENT_RUNNING:
+      vent_cycle();
+      break;
+    case VENT_SETTING:
+      vent_settings();
       break;
     default:
       break;
   }
-  updateMotor(motorDir);
+}
+
+void initVent() {
+  
+}
+
+void vent_stop() {
+  updateMotor(MOTOR_HALT);
+  delay(500);
+  if (runHomeSequence) {
+    runHomeSequence = false;
+    homingSequence();
+  }
+}
+
+void vent_settings() {
+  vent_stop();
+  switch (currentSetting) {
+    case NO_SETTING:
+      break;
+    case BPM:
+      if (menuNav == NAV_BACK) {
+        menuNav = NAV_NULL;
+        volume.BPM = currentSettingVal;
+        Serial.print("Saving BPM value: ");
+        Serial.println(volume.BPM);
+        updateVentCycleParams();
+      }
+      break;
+    case TV:
+      if (menuNav == NAV_BACK) {
+        Serial.print("Saving TV value: ");
+        menuNav = NAV_NULL;
+        volume.TV = currentSettingVal;
+        Serial.println(volume.TV);
+        stroke.maxEncoderStroke = volume.TV * ENCODER_FACTOR;
+        Serial.print("Max Stroke: ");
+        Serial.println(stroke.maxEncoderStroke);
+        updateVentCycleParams();
+      }
+      break;
+    case IER:
+      if (menuNav == NAV_BACK) {
+        menuNav = NAV_NULL;
+        volume.IERatio = currentSettingVal;
+        Serial.print("Saving IE Ratio: ");
+        Serial.println(volume.IERatio);
+        updateVentCycleParams();
+      }
+      break;
+    default:
+      break;
+  }
+}
+
+void updateVentCycleParams() {
+  // set the period of a single cycle from the BPM
+  stroke.period = 60/volume.BPM;
+  Serial.print("Set period: ");
+  Serial.println(stroke.period);
+  // set the inspiration time iTime = (I*period)/(I+E)
+  stroke.iTime = (1 * stroke.period)/(1 + volume.IERatio);
+  Serial.print("Set iTime: ");
+  Serial.println(stroke.iTime);
+  // set the expiration time eTime = (E*period)/(I+E)
+  stroke.eTime = (volume.IERatio * stroke.period)/(1 + volume.IERatio);
+  Serial.print("Set eTime: ");
+  Serial.println(stroke.eTime);
+  // calculate the motor speed
+  float strokeSpeed = volume.TV / stroke.iTime;
+  stroke.forwardMotorSpeed = (strokeSpeed * 255)/PERCENT_PER_SEC;
+  Serial.print("Set forward motor speed: ");
+  Serial.println(stroke.forwardMotorSpeed);
+  strokeSpeed = volume.TV / stroke.eTime;
+  stroke.revMotorSpeed = (strokeSpeed * 255)/PERCENT_PER_SEC;
+  Serial.print("Set rev motor speed: ");
+  Serial.println(stroke.revMotorSpeed);
+}
+
+void vent_cycle() {
+
+  if (runHomeSequence) {
+    runHomeSequence = false;
+    homingSequence();
+    delay(1000);
+  }
+  int encoderVal = readEncoder();
+//  Serial.print("Encoder value");
+//  Serial.println(encoderVal);
+  int motorSpeed = 0;
+
+  switch (ventStrokeDir) {
+    case MOTOR_HALT:
+      
+      break;
+    case CLOCKWISE:
+    {
+      if (encoderVal >= stroke.maxEncoderStroke) {
+//        Serial.println("----------------------");
+//        Serial.println("Max reached!");
+//        Serial.println("----------------------");
+        ventStrokeDir = COUNTERCLOCKWISE;
+        motorSpeed = stroke.revMotorSpeed;
+      } else {
+        motorSpeed = stroke.forwardMotorSpeed;
+      }
+      break;
+    }
+    case COUNTERCLOCKWISE:
+      if (encoderVal <= 0) {
+//        Serial.println("----------------------");
+//        Serial.println("Min reached!");
+//        Serial.println("----------------------");
+        ventStrokeDir = CLOCKWISE;
+        motorSpeed = stroke.forwardMotorSpeed;
+      } else {
+        motorSpeed = stroke.revMotorSpeed;
+      }
+      break;
+    default:
+      break;
+  }
+  setMotorSpeed(motorSpeed);
+  updateMotor(ventStrokeDir);
 }
 
 void homingSequence() {
@@ -142,18 +313,13 @@ void homingSequence() {
   minEncoderVal = encoderVal;
   char homeBuf[20], lastBuf[20], currentBuf[20], encBuf[20];
   unsigned long updateMillis = millis();
-
-  u8g.firstPage();
-  do {
-    u8g.drawStr(0, 32, "BOOTING...");
-  } while(u8g.nextPage());
   
   while (!homeFound) {
     
     lastEncoderVal = encoderVal;
     encoderVal = readEncoder();
 
-    // THIS UPDATE IS TOO SLOW TO BE WORK HERE. USE SERIAL INSTEAD
+    // THIS UPDATE IS TOO SLOW TO WORK HERE. USE SERIAL INSTEAD
 //    u8g.firstPage();
 //    do {
 //        sprintf(homeBuf, "Enc Val: %d %d", encoderVal, lastEncoderVal);
@@ -250,6 +416,13 @@ void homingSequence() {
     setMotorSpeed(homeMotorSpeed);
     updateMotor(dir);
   }
+
+//  set position as home
+  motorEncodedValue = 0;
+}
+
+int readScrollEncoder() {
+  return encodedValue >> 2;
 }
 
 int readEncoder() {
@@ -263,7 +436,7 @@ void updateDisplay() {
       currentMenuItemNo = 0;
       switch(statusDisplay) {
         case VOL_DISPLAY:
-          drawVolScreen(60, 22, 3);
+          drawVolScreen(volume.TV, volume.BPM, volume.IERatio);
           break;
         case PRESSURE_DISPLAY:
           drawPressureScreen(10, 0, 0);
@@ -273,7 +446,7 @@ void updateDisplay() {
             displayTime = millis();
             switch(lastDisplay) {
               case VOL_DISPLAY:
-                drawVolScreen(60, 22, 3);
+                drawVolScreen(volume.TV, volume.BPM, volume.IERatio);
                 lastDisplay = VOL_DISPLAY;
                 break;
               case PRESSURE_DISPLAY:
@@ -539,12 +712,16 @@ ISR (PCINT1_vect) {
   if (bit_is_clear(PINC, PC4)) {
     if (millis() - lastStartButtonPress > 500) {
       lastStartButtonPress = millis();
-      switch (runMotor) {
-        case 0:
-          runMotor = 1;
+      switch (ventState) {
+        case VENT_IDLE:
+          runHomeSequence = true;
+          ventState = VENT_RUNNING;
+          Serial.println("Vent Running!");
           break;
-        case 1:
-          runMotor = 0;
+        case VENT_RUNNING:
+          runHomeSequence = true;
+          ventState = VENT_IDLE;
+          Serial.println("Vent Idle!");
           break;
         default:
           break;
@@ -557,8 +734,12 @@ ISR (PCINT1_vect) {
       lastDialPress = millis();
       switch(displayScreen) {
         case STATUS_SCREEN:
+        {
+          if (ventState == VENT_RUNNING) runHomeSequence = true;
+          ventState = VENT_SETTING;
           displayScreen = MENU_SCREEN;
           break;
+        }
         case MENU_SCREEN:
         {
           switch(selectedMenuItem) {
@@ -569,6 +750,7 @@ ISR (PCINT1_vect) {
               displayScreen = DISPLAY_MENU;
               break;
             case 2:
+              ventState = VENT_IDLE;
               displayScreen = STATUS_SCREEN;
               break;
             default:
@@ -595,6 +777,7 @@ ISR (PCINT1_vect) {
               displayScreen = MENU_SCREEN;
               break;
             case 4:
+              ventState = VENT_IDLE;
               displayScreen = STATUS_SCREEN;
               break;
             default:
@@ -606,14 +789,17 @@ ISR (PCINT1_vect) {
         {
           switch(selectedMenuItem) {
             case 0:
+              ventState = VENT_IDLE;
               statusDisplay = VOL_DISPLAY;
               displayScreen = STATUS_SCREEN;
               break;
             case 1:
+              ventState = VENT_IDLE;
               statusDisplay = PRESSURE_DISPLAY;
               displayScreen = STATUS_SCREEN;
               break;
             case 2:
+              ventState = VENT_IDLE;
               statusDisplay = VOL_PRESSURE_DISPLAY;
               displayScreen = STATUS_SCREEN;
               break;
@@ -621,6 +807,7 @@ ISR (PCINT1_vect) {
               displayScreen = MENU_SCREEN;
               break;
             case 4:
+              ventState = VENT_IDLE;
               displayScreen = STATUS_SCREEN;
               break;
             default:
@@ -629,6 +816,8 @@ ISR (PCINT1_vect) {
         }
           break;
         case SET_SCREEN:
+          currentSettingVal = readScrollEncoder();
+          menuNav = NAV_BACK;
           displayScreen = SETTINGS_MENU;
           break;
       }
@@ -639,14 +828,20 @@ ISR (PCINT1_vect) {
   
 }
 
-void drawVolScreen(int volume, int RR, int IERatio) {
+void drawVolScreen(int vol, int RR, int IERatio) {
+//  Serial.println("Draw Volume Screen");
   u8g.setFont(u8g_font_10x20);
   char volBuf[20], RRBuf[20], IERatioBuf[20];
 
-  sprintf(volBuf, "TV=%d max", volume);
-  sprintf(RRBuf, "RR=%d/min", RR);
+//  Serial.print("TV: ");
+//  Serial.print(volume.TV);
+  sprintf(volBuf, "TV=%d max", vol);
+//  Serial.print("\tBPM");
+  sprintf(RRBuf, "BPM=%d/min", RR);
+//  Serial.println("\tIE Ratio");
   sprintf(IERatioBuf, "I:E=1:%d", IERatio);
 
+//  Serial.println("Drawing values");
   u8g.drawStr(0, 14, "Set:");
   u8g.drawStr(10, 30, volBuf);
   u8g.drawStr(10, 46, RRBuf);
