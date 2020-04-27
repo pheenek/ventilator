@@ -116,6 +116,18 @@ typedef struct {
   int revMotorSpeed;
 } Stroke_t;
 
+typedef enum {
+  BPM_MAX = 25,
+  TV_MAX = 100,
+  IER_MAX = 5
+} SettingMax_t;
+
+typedef enum {
+  BPM_MIN = 10,
+  TV_MIN = 10,
+  IER_MIN = 1
+} SettingMin_t;
+
 U8GLIB_ST7920_128X64_1X u8g(U8G_SCK, U8G_MOSI, U8G_SS_PIN);
 HX711 scale;
 
@@ -149,6 +161,10 @@ volatile bool runHomeSequence = false;
 Navigation_t menuNav = NAV_NULL;
 volatile int currentSettingVal = 0;
 long ventPauseMillis;
+volatile bool firstEntry = false;
+volatile SettingMax_t settingMax = 0;
+volatile SettingMin_t settingMin = 0;
+unsigned long pressureUpdateMillis = millis();
 
 int selectedMenuItem = 0;
 int currentMenuItemNo = 0;
@@ -156,7 +172,6 @@ int currentMenuItemNo = 0;
 volatile int encodedValue = 0, KEY = 0, lastEncodedValue = 0;
 volatile int motorEncodedValue = 0, lastMotorEncodedValue = 0;
 
-bool idle = false;
 void setup() {
   //  Serial.begin(115200);
   //  valveInit();
@@ -200,7 +215,6 @@ void loop() {
 
   switch (ventState) {
     case VENT_IDLE:
-      idle = true;
       vent_stop();
       break;
     case VENT_RUNNING:
@@ -211,6 +225,11 @@ void loop() {
       break;
     default:
       break;
+  }
+
+  if (millis() - pressureUpdateMillis > 500) {
+    pressureUpdateMillis = millis();
+    readPressureSensor();
   }
 }
 
@@ -524,7 +543,7 @@ void updateDisplay() {
             break;
           case PRESSURE_DISPLAY:
             // drawPressureScreen(pressure.peak, pressure.plateau, pressure.peep);
-            readPressureSensor();
+            // readPressureSensor();
             drawCurrentPressure(pressure.peak, pressure.current);
             break;
           case VOL_PRESSURE_DISPLAY:
@@ -537,7 +556,7 @@ void updateDisplay() {
                   break;
                 case PRESSURE_DISPLAY:
                   // drawPressureScreen(pressure.peak, pressure.plateau, pressure.peep);
-                  readPressureSensor();
+                  // readPressureSensor();
                   drawCurrentPressure(pressure.peak, pressure.current);
                   lastDisplay = PRESSURE_DISPLAY;
                   break;
@@ -567,14 +586,35 @@ void updateDisplay() {
       int setValue = encodedValue >> 2;
       switch (currentSetting) {
         case BPM:
+        {
+          if (firstEntry) {
+            firstEntry = false;
+            setValue = volume.BPM;
+            encodedValue = setValue << 2;
+          }
           setting = "BPM";
           break;
+        }
         case TV:
+        {
+          if (firstEntry) {
+            firstEntry = false;
+            setValue = volume.TV;
+            encodedValue = setValue << 2;
+          }
           setting = "Tidal Vol";
           break;
+        }
         case IER:
+        {
+          if (firstEntry) {
+            firstEntry = false;
+            setValue = volume.IERatio;
+            encodedValue = setValue << 2;
+          }
           setting = "I:E Ratio";
           break;
+        }
         default:
           break;
       }
@@ -787,11 +827,11 @@ ISR (PCINT1_vect) {
     } else {
       if (sum == 0b1101 || sum == 0b0100 || sum == 0b0010 || sum == 0b1011) {
         int newVal = encodedValue - 1;
-        if (((newVal >> 2) < 100) && ((newVal >> 2) >= 0)) encodedValue--;
+        if (((newVal >> 2) <= settingMax) && ((newVal >> 2) >= settingMin)) encodedValue--;
       }
       if (sum == 0b1110 || sum == 0b1000 || sum == 0b0001 || sum == 0b0111) {
         int newVal = encodedValue + 1;
-        if ((newVal >> 2) < 100) encodedValue++;
+        if ((newVal >> 2) <= settingMax) encodedValue++;
       }
     }
     lastEncodedValue = encoded;
@@ -823,8 +863,8 @@ ISR (PCINT1_vect) {
       switch (displayScreen) {
         case STATUS_SCREEN:
           {
-            if (ventState == VENT_RUNNING) runHomeSequence = true;
-            ventState = VENT_SETTING;
+            // if (ventState == VENT_RUNNING) runHomeSequence = true;
+            // ventState = VENT_SETTING;
             displayScreen = MENU_SCREEN;
             break;
           }
@@ -848,20 +888,32 @@ ISR (PCINT1_vect) {
           break;
         case SETTINGS_MENU:
           {
+            if (ventState == VENT_RUNNING) runHomeSequence = true;
+            ventState = VENT_SETTING;
             switch (selectedMenuItem) {
               case 0:
+                firstEntry = true;
                 currentSetting = BPM;
+                settingMax = BPM_MAX;
+                settingMin = BPM_MIN;
                 displayScreen = SET_SCREEN;
                 break;
               case 1:
+                firstEntry = true;
                 currentSetting = TV;
+                settingMax = TV_MAX;
+                settingMin = TV_MIN;
                 displayScreen = SET_SCREEN;
                 break;
               case 2:
+                firstEntry = true;
                 currentSetting = IER;
+                settingMax = IER_MAX;
+                settingMin = IER_MIN;
                 displayScreen = SET_SCREEN;
                 break;
               case 3:
+                ventState = VENT_IDLE;
                 displayScreen = MENU_SCREEN;
                 break;
               case 4:
@@ -877,17 +929,17 @@ ISR (PCINT1_vect) {
           {
             switch (selectedMenuItem) {
               case 0:
-                ventState = VENT_IDLE;
+//                ventState = VENT_IDLE;
                 statusDisplay = VOL_DISPLAY;
                 displayScreen = STATUS_SCREEN;
                 break;
               case 1:
-                ventState = VENT_IDLE;
+//                ventState = VENT_IDLE;
                 statusDisplay = PRESSURE_DISPLAY;
                 displayScreen = STATUS_SCREEN;
                 break;
               case 2:
-                ventState = VENT_IDLE;
+//                ventState = VENT_IDLE;
                 statusDisplay = VOL_PRESSURE_DISPLAY;
                 displayScreen = STATUS_SCREEN;
                 break;
@@ -904,10 +956,12 @@ ISR (PCINT1_vect) {
           }
           break;
         case SET_SCREEN:
+        {
           currentSettingVal = readScrollEncoder();
           menuNav = NAV_BACK;
           displayScreen = SETTINGS_MENU;
           break;
+        }
       }
       selectedMenuItem = 0;
       encodedValue = 0;
@@ -919,7 +973,7 @@ ISR (PCINT1_vect) {
 void drawVolScreen(int vol, int BPM, int IERatio) {
   //  Serial.println("Draw Volume Screen");
   u8g.setFont(u8g_font_10x20);
-  String volBuf = String("TV=" + String(vol) + "%max");
+  String volBuf = String("TV=" + String(ventState) + "%max");
   String BPMBuf = String("BPM=" + String(BPM) + "/min");
   String IERatioBuf = String("I:E=1:" + String(IERatio));
 
